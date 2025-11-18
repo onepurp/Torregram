@@ -1,0 +1,7 @@
+python-telegram-bot[job-queue]
+libtorrent
+telethon
+aiohttp
+python-dotenv
+rarfile
+py7zr
