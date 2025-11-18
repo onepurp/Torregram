@@ -309,24 +309,38 @@ async def prepare_file_for_upload(app, app_state, info_hash_str, file_path: str)
         metadata = await get_media_metadata(file_path)
         total_duration = metadata.get('duration', 0.0) if metadata else 0.0
 
-        command = [
+        command_fast = [
             'ffmpeg', '-nostdin', '-i', file_path, '-y',
-            '-progress', 'pipe:1',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-            '-c:a', 'aac', '-movflags', '+faststart',
+            '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart',
             '-pix_fmt', 'yuv420p',
             output_path
         ]
-        return_code = await run_ffmpeg_command(app, app_state, info_hash_str, os.path.basename(file_path), command, timeout=10800, total_duration=total_duration)
+        return_code_fast = await run_ffmpeg_command(app, app_state, info_hash_str, os.path.basename(file_path), command_fast, timeout=1800, total_duration=0)
 
-        if return_code == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            print(f"Successfully prepared (re-encoded): {os.path.basename(output_path)}")
+        if return_code_fast == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            print(f"Successfully prepared (fast mode): {os.path.basename(output_path)}")
             path_to_return = output_path
         else:
-            print(f"FFmpeg re-encoding failed with code {return_code}. Uploading original file.")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            path_to_return = file_path
+            print(f"Fast preparation failed. Falling back to full re-encoding (this may be slow)...")
+            
+            command_slow = [
+                'ffmpeg', '-nostdin', '-i', file_path, '-y',
+                '-progress', 'pipe:1',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-movflags', '+faststart',
+                '-pix_fmt', 'yuv420p',
+                output_path
+            ]
+            return_code_slow = await run_ffmpeg_command(app, app_state, info_hash_str, os.path.basename(file_path), command_slow, timeout=10800, total_duration=total_duration)
+
+            if return_code_slow == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print(f"Successfully prepared (slow mode): {os.path.basename(output_path)}")
+                path_to_return = output_path
+            else:
+                print(f"Full re-encoding also failed. Uploading original file.")
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                path_to_return = file_path
     
     except Exception as e:
         print(f"A critical error occurred during FFmpeg processing: {e}. Uploading original file.")
