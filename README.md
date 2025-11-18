@@ -30,7 +30,7 @@ The author is **not responsible** for any misuse of this software. This includes
 
 **The responsibility for any action performed using this software rests solely with the end user.** By using this software, you agree to take full responsibility for your actions and to not hold the author liable for any damages or legal consequences that may arise from its use.
 
-This disclaimer is in addition to the terms of the MIT License, which already provides a comprehensive waiver of liability.
+This disclaimer is in addition to the terms of the GPL3 License.
 
 ---
 
