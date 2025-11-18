@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import os
@@ -25,6 +24,7 @@ from state import AppState
 
 INDEX_FILE = "channel_index.json"
 
+# --- FIX: Renamed the function to match what other files are importing ---
 async def refresh_status_panel(bot: Bot, app_state: AppState, info_hash_str: str, current_task: str, is_final: bool = False):
     torrent_data = app_state.active_torrents.get(info_hash_str)
     if not torrent_data or not torrent_data.get('user_chat_id') or not torrent_data.get('status_message_id'):
@@ -93,7 +93,7 @@ async def refresh_status_panel(bot: Bot, app_state: AppState, info_hash_str: str
         if "Message is not modified" not in str(e):
             print(f"Error updating status panel (ignoring): {e}")
 
-# ... (The rest of the file is unchanged) ...
+# ... (The rest of the file is unchanged, but I'll include it for completeness) ...
 STATE_MAP = {
     lt.torrent_status.states.queued_for_checking: "Queued",
     lt.torrent_status.states.checking_files: "Checking",
