@@ -1,0 +1,1 @@
+!sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get install -y ffmpeg unrar-free && pip install -r requirements.txt && python3 main.py

@@ -40,4 +40,4 @@ TRACKER_URLS = [
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_udp.txt"
 ]
 PUBLIC_TRACKERS = []
-NUM_UPLOAD_WORKERS = 5
+NUM_UPLOAD_WORKERS = 7

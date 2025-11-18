@@ -12,6 +12,4 @@ class AppState:
     active_torrents: dict = field(default_factory=dict)
     torrent_metadata_cache: dict = field(default_factory=dict)
     channel_file_index: set = field(default_factory=set)
-
-    # A dictionary to hold a lock for each active torrent
     torrent_locks: dict = field(default_factory=dict)
