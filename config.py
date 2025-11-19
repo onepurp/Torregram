@@ -1,4 +1,3 @@
-
 import os
 from dotenv import load_dotenv
 
@@ -31,13 +30,21 @@ STORAGE_BUFFER_GB = 2.0
 VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov', '.webm')
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.ogg', '.m4a')
-# --- NEW: Define archive extensions ---
 ARCHIVE_EXTENSIONS = ('.zip', '.rar', '.7z')
-# ------------------------------------
-UPLOAD_WORKERS = 10
+
+# --- PERFORMANCE TUNING ---
+# How many files to process in parallel (The "Cashiers")
+NUM_UPLOAD_WORKERS = 5 
+
+# Telethon Internal Tuning (The "Speed of each Cashier")
+# 4 workers per file is the sweet spot for Telegram. Higher values often cause "NetworkError".
+TELETHON_UPLOAD_WORKERS = 4 
+# 2048KB (2MB) chunks reduce HTTP overhead significantly compared to the default 512KB.
+TELETHON_PART_SIZE_KB = 2048 
+# --------------------------
+
 TRACKER_URLS = [
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all_udp.txt"
 ]
 PUBLIC_TRACKERS = []
-NUM_UPLOAD_WORKERS = 7
