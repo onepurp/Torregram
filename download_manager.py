@@ -6,7 +6,6 @@ from telegram.ext import Application, ContextTypes
 
 import config
 from state import AppState
-# --- FIX: Import the correct, renamed function ---
 from telegram_uploader import refresh_status_panel
 
 async def start_download_job(app: Application, app_state: AppState, session, item: dict):
@@ -17,7 +16,6 @@ async def start_download_job(app: Application, app_state: AppState, session, ite
     torrent_data['user_chat_id'] = item["chat_id"]
     if not torrent_data.get('status_message_id'):
         info = torrent_data["handle"].torrent_file()
-        # --- FIX: Use the new function to create the initial panel ---
         status_message = await app.bot.send_message(chat_id=item["chat_id"], text=f"⏳ Queued `{info.name()}`...")
         torrent_data['status_message_id'] = status_message.message_id
         await refresh_status_panel(app.bot, app_state, info_hash_str, "Waiting for available space...")
@@ -68,7 +66,6 @@ async def monitor_download(context: ContextTypes.DEFAULT_TYPE):
         context.job.schedule_removal()
         return
 
-    # --- FIX: Call the correct, renamed function ---
     await refresh_status_panel(context.bot, app_state, info_hash_str, "Downloading...")
 
     if status.state in (lt.torrent_status.seeding, lt.torrent_status.finished):
@@ -85,7 +82,9 @@ async def monitor_download(context: ContextTypes.DEFAULT_TYPE):
                 await app_state.upload_queue.put({
                     "path": full_path,
                     "info_hash": info_hash_str,
-                    "extract": should_extract
+                    "extract": should_extract,
+                    # --- FIX: Pass the file index to the uploader ---
+                    "file_index": i
                 })
                 
                 torrent_data["download_complete_files"].append(full_path)
