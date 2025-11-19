@@ -26,7 +26,7 @@ from state import AppState
 INDEX_FILE = "channel_index.json"
 MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024 # 2000 MB safe limit
 
-# ... (All functions from the top down to split_large_file are unchanged) ...
+# ... (All functions from the top down to upload_with_telethon are unchanged) ...
 def load_index_from_disk(app_state: AppState):
     print("Loading channel file index from disk...")
     try:
@@ -387,7 +387,7 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         await telethon_client.send_file(
             config.TARGET_CHAT_ID, 
             file_path, 
-            caption=original_filename, 
+            caption="", 
             force_document=force_document, 
             attributes=attributes, 
             workers=config.TELETHON_UPLOAD_WORKERS, 
@@ -407,6 +407,7 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         print(f"Telethon: Error uploading {file_path}: {e}")
         return False
 
+# --- FIX: Robust Error Handling in Splitter ---
 def _split_file_sync(file_path, split_dir, chunk_size, max_size, progress_callback):
     try:
         base_name = os.path.basename(file_path)
@@ -444,9 +445,19 @@ def _split_file_sync(file_path, split_dir, chunk_size, max_size, progress_callba
                 if infile.tell() >= file_size:
                     break
         return parts
-    except Exception as e:
-        print(f"Error in sync splitter: {e}")
+    except OSError as e:
+        # Catch "Input/output error" and other filesystem issues
+        print(f"Critical error in sync splitter: {e}. File may have been deleted.")
+        # Clean up any partial parts
+        for part in parts:
+            if os.path.exists(part):
+                try: os.remove(part)
+                except: pass
         return []
+    except Exception as e:
+        print(f"Unexpected error in sync splitter: {e}")
+        return []
+# ----------------------------------------------
 
 async def split_large_file(app, app_state, info_hash_str, file_path: str) -> list[str]:
     print(f"Splitting large file: {os.path.basename(file_path)}")
@@ -479,7 +490,6 @@ async def split_large_file(app, app_state, info_hash_str, file_path: str) -> lis
         
     return parts
 
-# --- FIX: Pass the session object to flush_upload_buffer ---
 async def flush_upload_buffer(app, telethon_client, app_state, info_hash_str, session):
     if info_hash_str not in app_state.torrent_locks: return
     lock = app_state.torrent_locks[info_hash_str]
@@ -521,7 +531,6 @@ async def flush_upload_buffer(app, telethon_client, app_state, info_hash_str, se
             
             handle = torrent_data["handle"]
             if handle.is_valid():
-                # --- FIX: Use the passed session object ---
                 session.remove_torrent(handle, session.delete_files)
             
             jobs = app.job_queue.get_jobs_by_name(f"job_{info_hash_str}")
@@ -585,7 +594,6 @@ async def uploader_worker(app, telethon_client: TelegramClient, app_state: AppSt
                 if torrent_data:
                     torrent_data["ready_buffer"][file_index] = prepared_files
             
-            # --- FIX: Pass the session object ---
             await flush_upload_buffer(app, telethon_client, app_state, info_hash_str, session)
 
         except Exception as e:
