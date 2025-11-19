@@ -1,4 +1,3 @@
-
 import asyncio
 import math
 import os
@@ -47,10 +46,22 @@ async def process_torrent_file(update: Update, context: ContextTypes.DEFAULT_TYP
         
         if info_hash_str not in app_state.active_torrents:
             app_state.active_torrents[info_hash_str] = {
-                "handle": handle, "files_to_download": {}, "download_complete_files": [], 
-                "successfully_uploaded_files": [], "status_message_id": None, "user_chat_id": None,
-                "jobs_total": 0, "jobs_completed": 0, "seeding_paused": False,
-                "details_visible": False, "selection_mode": False, "selection": set()
+                "handle": handle, 
+                "files_to_download": {}, 
+                "download_complete_files": [], 
+                "successfully_uploaded_files": [], 
+                "status_message_id": None, 
+                "user_chat_id": None,
+                "jobs_total": 0, 
+                "jobs_completed": 0, 
+                "seeding_paused": False,
+                "details_visible": False, 
+                "selection_mode": False, 
+                "selection": set(),
+                # --- NEW: Sequencing State ---
+                "upload_order": [],       # List of file indices in the correct order
+                "current_upload_idx": 0,  # Pointer to the current index in upload_order
+                "ready_buffer": {}        # Storage for processed files waiting for their turn
             }
             app_state.torrent_locks[info_hash_str] = asyncio.Lock()
         
@@ -176,6 +187,9 @@ async def _handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     torrent_data = app_state.active_torrents[info_hash_str]
 
+    # Sort indices to ensure we add them to the order list correctly
+    indices.sort()
+
     for index in indices:
         filename = os.path.basename(files.file_path(index))
         filesize = files.file_size(index)
@@ -189,6 +203,8 @@ async def _handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             files_to_queue.append(index)
             total_size += filesize
             torrent_data["files_to_download"][index] = {"extract": should_extract_this_file}
+            # --- FIX: Add to the ordered list of uploads ---
+            torrent_data["upload_order"].append(index)
 
     response_message = ""
     if files_to_queue:
@@ -232,7 +248,6 @@ async def _handle_cancellation(update: Update, context: ContextTypes.DEFAULT_TYP
             job.schedule_removal()
             print(f"Removed job: {job.name}")
 
-        # --- FIX: Offload blocking I/O to a background thread ---
         if handle.is_valid():
             await asyncio.to_thread(session.remove_torrent, handle, session.delete_files)
 
@@ -240,7 +255,6 @@ async def _handle_cancellation(update: Update, context: ContextTypes.DEFAULT_TYP
             temp_torrent_path = app_state.torrent_metadata_cache.pop(info_hash_str)
             if os.path.exists(temp_torrent_path):
                 await asyncio.to_thread(os.remove, temp_torrent_path)
-        # ---------------------------------------------------------
         
         if info_hash_str in app_state.active_torrents:
             del app_state.active_torrents[info_hash_str]
