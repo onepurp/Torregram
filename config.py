@@ -1,3 +1,4 @@
+# config.py
 import os
 from dotenv import load_dotenv
 
@@ -33,13 +34,10 @@ AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.ogg', '.m4a')
 ARCHIVE_EXTENSIONS = ('.zip', '.rar', '.7z')
 
 # --- PERFORMANCE TUNING ---
-# How many files to process in parallel (The "Cashiers")
 NUM_UPLOAD_WORKERS = 5 
 
-# Telethon Internal Tuning (The "Speed of each Cashier")
-# 4 workers per file is the sweet spot for Telegram. Higher values often cause "NetworkError".
+# Telethon Internal Tuning
 TELETHON_UPLOAD_WORKERS = 4 
-# 2048KB (2MB) chunks reduce HTTP overhead significantly compared to the default 512KB.
 TELETHON_PART_SIZE_KB = 2048 
 # --------------------------
 
