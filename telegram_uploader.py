@@ -383,20 +383,18 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
 
         print(f"Telethon: Starting upload for {original_filename} (as_document: {force_document})")
         
-        # --- FIX: Optimized Upload Settings ---
-        # Use a larger part size (512KB is default, 2048KB is better for speed)
-        # Use more parallel workers (default is 1, we use 4)
+        # --- FIX: Use the optimized settings from config.py ---
         await telethon_client.send_file(
             config.TARGET_CHAT_ID, 
             file_path, 
             caption=original_filename, 
             force_document=force_document, 
             attributes=attributes, 
-            part_size_kb=2048, # Larger chunks
-            workers=4,         # Parallel uploads
+            workers=config.TELETHON_UPLOAD_WORKERS, 
+            part_size_kb=config.TELETHON_PART_SIZE_KB,
             progress_callback=progress_callback
         )
-        # --------------------------------------
+        # ----------------------------------------------------
         
         print(f"Telethon: Successfully uploaded {original_filename}")
         
