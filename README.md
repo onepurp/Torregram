@@ -1,4 +1,4 @@
-# Torregram 
+# Torregram 🧲
 
 A high-performance, resilient Telegram bot to "Teleport" files from the BitTorrent network directly to your Telegram channel.
 
@@ -11,8 +11,12 @@ A high-performance, resilient Telegram bot to "Teleport" files from the BitTorre
 
 *   **Intelligent Media Processing:**
     *   **🎬 Streamable Videos:** Automatically re-encodes all videos to a streamable `.mp4` format, ensuring they play instantly on any device.
-    *   **🗂️ Recursive Archive Extraction:** Intelligently unpacks `.zip`, `.rar`, and `.7z` files (including nested archives) and uploads their contents.
+    *   **🧠 Smart Fallbacks:** If a video is corrupted or in a strange format, Torregram attempts a fast conversion first. If that fails, it automatically switches to a slower, robust re-encoding method to guarantee a valid file.
     *   **✨ Metadata Enrichment:** Fetches metadata like duration and dimensions, so your media files display perfectly in Telegram with thumbnails and timelines.
+
+*   **Advanced File Handling:**
+    *   **🗂️ Recursive Archive Extraction:** Intelligently unpacks `.zip`, `.rar`, and `.7z` files (including nested archives) and uploads their contents.
+    *   **✂️ Auto-Split Large Files:** Automatically detects files larger than Telegram's 2GB limit and splits them into uploadable parts, ensuring you never lose a file due to size restrictions.
 
 *   **Advanced User Interface:**
     *   **🛒 Selection Mode:** A "shopping cart" system allows you to select multiple files across different pages before applying a batch action (like "Download Selected" or "Extract Selected").
@@ -21,7 +25,7 @@ A high-performance, resilient Telegram bot to "Teleport" files from the BitTorre
 
 *   **Efficient & Resilient:**
     *   **🔎 Duplicate Detection:** Remembers every file uploaded to your channel and automatically skips downloading or uploading duplicates, saving bandwidth and storage.
-    *   **🧠 Smart Fallbacks:** If a video is corrupted or in a strange format, Torregram will attempt a fast conversion first, then automatically fall back to a slower, more robust method, guaranteeing the best possible output.
+    *   **🛑 No Seeding:** Automatically pauses torrents immediately after download completion to prevent bandwidth usage from seeding.
 
 ---
 
@@ -103,6 +107,3 @@ python main.py
     *   Use "Process All Files" to download or smart-extract the entire torrent.
 5.  A live status panel will appear in your chat, keeping you updated on the progress. You can cancel any job from this panel.
 6.  The final, processed files will appear cleanly in your target channel.
-
-
-
