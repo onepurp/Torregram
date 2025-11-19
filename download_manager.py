@@ -32,6 +32,29 @@ async def start_download_job(app: Application, app_state: AppState, session, ite
         job_data = {"info_hash": info_hash_str, "app_state": app_state, "session": session}
         app.job_queue.run_repeating(monitor_download, interval=10, first=0, data=job_data, name=job_name)
 
+# --- NEW: Background task to queue files ---
+async def queue_files_for_upload(app_state, info_hash_str, torrent_data, info):
+    """Iterates through files and adds them to the upload queue in the background."""
+    files = info.files()
+    for i in list(torrent_data["files_to_download"].keys()):
+        full_path = os.path.join("./downloads", files.file_path(i))
+        
+        if os.path.exists(full_path) and full_path not in torrent_data["download_complete_files"]:
+            print(f"File '{os.path.basename(full_path)}' confirmed stable. Adding to upload queue.")
+            
+            file_options = torrent_data["files_to_download"][i]
+            should_extract = file_options.get("extract", False)
+            
+            await app_state.upload_queue.put({
+                "path": full_path,
+                "info_hash": info_hash_str,
+                "extract": should_extract,
+                "file_index": i
+            })
+            
+            torrent_data["download_complete_files"].append(full_path)
+# -------------------------------------------
+
 async def monitor_download(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     info_hash_str = job_data["info_hash"]
@@ -69,25 +92,10 @@ async def monitor_download(context: ContextTypes.DEFAULT_TYPE):
     await refresh_status_panel(context.bot, app_state, info_hash_str, "Downloading...")
 
     if status.state in (lt.torrent_status.seeding, lt.torrent_status.finished):
-        files = info.files()
-        for i in list(torrent_data["files_to_download"].keys()):
-            full_path = os.path.join("./downloads", files.file_path(i))
-            
-            if os.path.exists(full_path) and full_path not in torrent_data["download_complete_files"]:
-                print(f"File '{os.path.basename(full_path)}' confirmed stable. Adding to upload queue.")
-                
-                file_options = torrent_data["files_to_download"][i]
-                should_extract = file_options.get("extract", False)
-                
-                await app_state.upload_queue.put({
-                    "path": full_path,
-                    "info_hash": info_hash_str,
-                    "extract": should_extract,
-                    # --- FIX: Pass the file index to the uploader ---
-                    "file_index": i
-                })
-                
-                torrent_data["download_complete_files"].append(full_path)
+        # --- FIX: Offload the heavy queuing logic to a background task ---
+        # This prevents the monitor job from blocking the event loop
+        asyncio.create_task(queue_files_for_upload(app_state, info_hash_str, torrent_data, info))
+        # -----------------------------------------------------------------
         
         if not torrent_data.get("seeding_paused"):
             print(f"Download complete for '{info.name()}'. Pausing torrent to stop seeding.")
