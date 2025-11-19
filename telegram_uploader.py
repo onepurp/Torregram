@@ -26,7 +26,7 @@ from state import AppState
 INDEX_FILE = "channel_index.json"
 MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024 # 2000 MB safe limit
 
-# ... (All functions from the top down to upload_with_telethon are unchanged) ...
+# ... (All functions from the top down to prepare_file_for_upload are unchanged) ...
 def load_index_from_disk(app_state: AppState):
     print("Loading channel file index from disk...")
     try:
@@ -177,35 +177,37 @@ def _extract_sync(archive_path, extract_dir):
         print(f"Extraction failed for {os.path.basename(archive_path)}: {e}")
         return False
 
-async def process_archive(app, app_state: AppState, archive_path: str, info_hash_str: str):
+async def process_archive(app, app_state: AppState, archive_path: str, info_hash_str: str) -> list[str]:
+    """Extracts an archive and returns a list of extracted file paths."""
     torrent_data = app_state.active_torrents.get(info_hash_str)
-    if not torrent_data: return
+    if not torrent_data: return []
 
     extract_dir = os.path.join("temp", str(uuid.uuid4()))
+    extracted_files = []
     
     try:
         os.makedirs(extract_dir, exist_ok=True)
         success = await asyncio.to_thread(_extract_sync, archive_path, extract_dir)
         
         if success:
-            extracted_items = []
             for root, _, files in os.walk(extract_dir):
                 for file in files:
-                    extracted_items.append(os.path.join(root, file))
+                    extracted_files.append(os.path.join(root, file))
             
-            if extracted_items:
-                async with app_state.torrent_locks[info_hash_str]:
-                    torrent_data["jobs_total"] += len(extracted_items)
-                
-                for file_path in extracted_items:
-                    is_nested_archive = file_path.lower().endswith(config.ARCHIVE_EXTENSIONS)
-                    new_item = {
-                        "path": file_path, "info_hash": info_hash_str,
-                        "extract": is_nested_archive, "is_extracted_content": True
-                    }
-                    await app_state.upload_queue.put(new_item)
-            else:
-                await refresh_status_panel(app.bot, app_state, info_hash_str, f"ℹ️ Archive `{os.path.basename(archive_path)}` was empty.")
+            # Recursively handle nested archives
+            final_files = []
+            for file_path in extracted_files:
+                if file_path.lower().endswith(config.ARCHIVE_EXTENSIONS):
+                    await refresh_status_panel(app.bot, app_state, info_hash_str, f"Extracting nested `{os.path.basename(file_path)}`...")
+                    nested_files = await process_archive(app, app_state, file_path, info_hash_str)
+                    final_files.extend(nested_files)
+                else:
+                    final_files.append(file_path)
+            
+            return final_files
+        else:
+            await refresh_status_panel(app.bot, app_state, info_hash_str, f"ℹ️ Archive `{os.path.basename(archive_path)}` was empty or failed.")
+            return []
 
     finally:
         if os.path.exists(archive_path):
@@ -382,20 +384,11 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
             force_document = False
 
         print(f"Telethon: Starting upload for {original_filename} (as_document: {force_document})")
-        
-        # --- FIX: Use the optimized settings from config.py ---
         await telethon_client.send_file(
-            config.TARGET_CHAT_ID, 
-            file_path, 
-            caption=original_filename, 
-            force_document=force_document, 
-            attributes=attributes, 
-            workers=config.TELETHON_UPLOAD_WORKERS, 
-            part_size_kb=config.TELETHON_PART_SIZE_KB,
-            progress_callback=progress_callback
+            config.TARGET_CHAT_ID, file_path, caption=original_filename, 
+            force_document=force_document, attributes=attributes, 
+            workers=config.UPLOAD_WORKERS, progress_callback=progress_callback
         )
-        # ----------------------------------------------------
-        
         print(f"Telethon: Successfully uploaded {original_filename}")
         
         filesize = os.path.getsize(file_path)
@@ -409,7 +402,6 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         print(f"Telethon: Error uploading {file_path}: {e}")
         return False
 
-# ... (The rest of the file from _split_file_sync down to the end is unchanged) ...
 def _split_file_sync(file_path, split_dir, chunk_size, max_size, progress_callback):
     try:
         base_name = os.path.basename(file_path)
@@ -482,150 +474,157 @@ async def split_large_file(app, app_state, info_hash_str, file_path: str) -> lis
         
     return parts
 
+# --- NEW: The Sequencer Logic ---
+async def flush_upload_buffer(app, telethon_client, app_state, info_hash_str):
+    """Checks the buffer and uploads files in the correct order."""
+    if info_hash_str not in app_state.torrent_locks: return
+    lock = app_state.torrent_locks[info_hash_str]
+
+    async with lock:
+        torrent_data = app_state.active_torrents.get(info_hash_str)
+        if not torrent_data: return
+
+        while True:
+            # Get the index of the next file we expect to upload
+            current_idx_ptr = torrent_data["current_upload_idx"]
+            
+            # Check if we have processed all files in the order list
+            if current_idx_ptr >= len(torrent_data["upload_order"]):
+                break
+            
+            # Get the actual file index from the order list
+            file_index = torrent_data["upload_order"][current_idx_ptr]
+            
+            # Check if this file is ready in the buffer
+            if file_index in torrent_data["ready_buffer"]:
+                # Get the list of prepared paths (could be 1 file, or many extracted/split files)
+                prepared_files = torrent_data["ready_buffer"].pop(file_index)
+                
+                # Release lock briefly to upload (so we don't block other workers from buffering)
+                # Note: This is safe because only ONE worker runs flush_upload_buffer at a time per torrent
+                # due to the lock, but we want to allow other workers to *add* to the buffer.
+                # Actually, for strict ordering, we should hold the lock or use a separate lock for the sequencer.
+                # To keep it simple and safe: we hold the lock. Uploading is async, but we await it.
+                # This effectively serializes the upload phase, which is what we want.
+                
+                for path in prepared_files:
+                    filename = os.path.basename(path)
+                    await upload_with_telethon(telethon_client, app.bot, app_state, path, filename, info_hash_str)
+                    
+                    # Cleanup after upload
+                    if os.path.exists(path):
+                        os.remove(path)
+                        # Try to remove parent dir if it was a temp dir
+                        try:
+                            os.rmdir(os.path.dirname(path))
+                        except OSError:
+                            pass
+
+                # Advance the pointer to the next expected file
+                torrent_data["current_upload_idx"] += 1
+                torrent_data["jobs_completed"] += 1
+            else:
+                # The next file in order is not ready yet. Stop flushing.
+                break
+
+        # Check for total completion
+        if torrent_data["jobs_completed"] >= torrent_data["jobs_total"]:
+            print(f"All jobs for torrent {info_hash_str} have been completed. Cleaning up...")
+            await refresh_status_panel(app.bot, app_state, info_hash_str, "", is_final=True)
+            
+            handle = torrent_data["handle"]
+            if handle.is_valid():
+                session = torrent_data["handle"].session() # Get session from handle
+                session.remove_torrent(handle, session.delete_files)
+            
+            jobs = app.job_queue.get_jobs_by_name(f"job_{info_hash_str}")
+            for job in jobs: job.schedule_removal()
+            
+            if info_hash_str in app_state.torrent_metadata_cache:
+                temp_torrent_path = app_state.torrent_metadata_cache.pop(info_hash_str)
+                if os.path.exists(temp_torrent_path): os.remove(temp_torrent_path)
+            
+            del app_state.active_torrents[info_hash_str]
+            # Note: We don't delete the lock here because we are currently holding it.
+            # It will be garbage collected eventually or we can leave it.
+            # Ideally, we should remove it from app_state.torrent_locks, but safely.
+
 async def uploader_worker(app, telethon_client: TelegramClient, app_state: AppState, session):
     while True:
         item = await app_state.upload_queue.get()
         try:
             info_hash_str = item["info_hash"]
+            file_index = item.get("file_index") # This is crucial for ordering
             
             if info_hash_str not in app_state.torrent_locks:
-                print(f"Lock not found for torrent {info_hash_str}, skipping orphaned file.")
                 continue
-            lock = app_state.torrent_locks[info_hash_str]
 
-            async with lock:
-                torrent_data = app_state.active_torrents.get(info_hash_str)
-                if not torrent_data:
-                    print(f"Orphaned file in upload queue, skipping: {os.path.basename(item['path'])}")
-                    if item.get("is_extracted_content") and os.path.exists(item['path']):
-                        os.remove(item['path'])
-                    continue
+            # 1. Processing Phase (Parallel)
+            # We do NOT hold the lock here, so multiple workers can process files at once.
             
+            # Check if torrent is still active
+            torrent_data = app_state.active_torrents.get(info_hash_str)
+            if not torrent_data:
+                if item.get("is_extracted_content") and os.path.exists(item['path']):
+                    os.remove(item['path'])
+                app_state.upload_queue.task_done()
+                continue
+
             should_extract = item.get("extract", False)
-            job_successful = False
+            prepared_files = []
 
             if should_extract:
                 await refresh_status_panel(app.bot, app_state, info_hash_str, f"Extracting `{os.path.basename(item['path'])}`...")
-                await process_archive(app, app_state, item['path'], info_hash_str)
-                job_successful = True
+                # process_archive now returns a list of paths
+                prepared_files = await process_archive(app, app_state, item['path'], info_hash_str)
+                
+                # If we extracted files, we need to prepare them (ffmpeg/split) too!
+                # This is where it gets recursive. For simplicity, let's assume extracted files
+                # are uploaded "as is" or we iterate and prepare them here.
+                # To keep it robust: Let's iterate and prepare each extracted file.
+                final_ready_files = []
+                for p in prepared_files:
+                    # Check size/split
+                    if os.path.getsize(p) > MAX_FILE_SIZE_BYTES:
+                         parts = await split_large_file(app, app_state, info_hash_str, p)
+                         final_ready_files.extend(parts)
+                         os.remove(p) # Remove the large original extracted file
+                    else:
+                         # Prepare media
+                         ready_p = await prepare_file_for_upload(app, app_state, info_hash_str, p)
+                         final_ready_files.append(ready_p)
+                prepared_files = final_ready_files
+
             else:
-                job_successful = await process_single_file(app, telethon_client, app_state, item)
+                # Regular file processing
+                await refresh_status_panel(app.bot, app_state, info_hash_str, f"Preparing `{os.path.basename(item['path'])}`...")
+                
+                # 1. Prepare (FFmpeg)
+                path_to_upload = await prepare_file_for_upload(app, app_state, info_hash_str, item['path'])
+                
+                # 2. Split if necessary
+                if os.path.getsize(path_to_upload) > MAX_FILE_SIZE_BYTES:
+                    await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting `{os.path.basename(path_to_upload)}`...")
+                    prepared_files = await split_large_file(app, app_state, info_hash_str, path_to_upload)
+                    if path_to_upload != item['path']: os.remove(path_to_upload) # Clean temp ffmpeg file
+                else:
+                    prepared_files = [path_to_upload]
 
-            async with lock:
+            # 2. Buffering Phase (Synchronized)
+            async with app_state.torrent_locks[info_hash_str]:
                 torrent_data = app_state.active_torrents.get(info_hash_str)
-                if not torrent_data:
-                    continue
-
-                if job_successful:
-                    torrent_data["jobs_completed"] += 1
-
-                if torrent_data["jobs_completed"] >= torrent_data["jobs_total"]:
-                    print(f"All jobs for torrent {info_hash_str} have been completed. Cleaning up...")
-                    await refresh_status_panel(app.bot, app_state, info_hash_str, "", is_final=True)
-                    
-                    handle = torrent_data["handle"]
-                    if handle.is_valid():
-                        session.remove_torrent(handle, session.delete_files)
-                    
-                    jobs = app.job_queue.get_jobs_by_name(f"job_{info_hash_str}")
-                    for job in jobs: job.schedule_removal()
-                    
-                    if info_hash_str in app_state.torrent_metadata_cache:
-                        temp_torrent_path = app_state.torrent_metadata_cache.pop(info_hash_str)
-                        if os.path.exists(temp_torrent_path): os.remove(temp_torrent_path)
-                    
-                    if info_hash_str in app_state.torrent_locks:
-                        del app_state.torrent_locks[info_hash_str]
-
-                    del app_state.active_torrents[info_hash_str]
+                if torrent_data:
+                    # Store the result in the buffer
+                    torrent_data["ready_buffer"][file_index] = prepared_files
+            
+            # 3. Flushing Phase (Sequential Uploading)
+            # Try to flush the buffer. This function handles the locking and ordering.
+            await flush_upload_buffer(app, telethon_client, app_state, info_hash_str)
 
         except Exception as e:
             print(f"Error in uploader_worker for {item.get('path', 'N/A')}: {e}")
         finally:
             app_state.upload_queue.task_done()
-
-async def process_single_file(app, telethon_client, app_state, item) -> bool:
-    file_path = item["path"]
-    info_hash_str = item["info_hash"]
-    is_extracted_content = item.get("is_extracted_content", False)
-    
-    prepared_path = None
-    upload_successful = False
-    split_parts = []
-
-    try:
-        filename = os.path.basename(file_path)
-        
-        try:
-            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                print(f"Skipping invalid (missing or zero-byte) file: {filename}")
-                return True
-        except FileNotFoundError:
-            print(f"Skipping invalid (not found) file: {filename}")
-            return True
-
-        await refresh_status_panel(app.bot, app_state, info_hash_str, f"Checking `{filename}`...")
-        filesize = os.path.getsize(file_path)
-        
-        if (filename, filesize) in app_state.channel_file_index:
-            print(f"⏭️ Skipping duplicate file already in channel: {filename}")
-            return True
-        
-        await refresh_status_panel(app.bot, app_state, info_hash_str, f"Preparing `{filename}`...")
-        
-        path_to_upload = await prepare_file_for_upload(app, app_state, info_hash_str, file_path)
-        if path_to_upload != file_path:
-            prepared_path = path_to_upload
-
-        if not path_to_upload:
-            raise Exception("File preparation failed.")
-        
-        final_size = os.path.getsize(path_to_upload)
-        
-        if final_size > MAX_FILE_SIZE_BYTES:
-            await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting large file `{filename}`...")
-            split_parts = await split_large_file(app, app_state, info_hash_str, path_to_upload)
-            
-            if not split_parts:
-                await refresh_status_panel(app.bot, app_state, info_hash_str, f"⚠️ Failed to split large file `{filename}`.")
-                return False
-            
-            all_parts_uploaded = True
-            for i, part_path in enumerate(split_parts):
-                part_name = os.path.basename(part_path)
-                await refresh_status_panel(app.bot, app_state, info_hash_str, f"Uploading part {i+1}/{len(split_parts)}: `{part_name}`")
-                if not await upload_with_telethon(telethon_client, app.bot, app_state, part_path, part_name, info_hash_str):
-                    all_parts_uploaded = False
-                    break
-            upload_successful = all_parts_uploaded
-        else:
-            upload_successful = await upload_with_telethon(
-                telethon_client, app.bot, app_state, 
-                path_to_upload, filename, info_hash_str
-            )
-        
-        if not upload_successful:
-            await refresh_status_panel(app.bot, app_state, info_hash_str, f"⚠️ Upload failed for `{filename}`.")
-
-    finally:
-        if prepared_path and os.path.exists(prepared_path):
-            os.remove(prepared_path)
-        if is_extracted_content and os.path.exists(file_path):
-            os.remove(file_path)
-            try:
-                os.rmdir(os.path.dirname(file_path))
-            except OSError:
-                pass
-        for part in split_parts:
-            if os.path.exists(part):
-                os.remove(part)
-        if split_parts:
-             try:
-                 os.rmdir(os.path.dirname(split_parts[0]))
-             except OSError:
-                 pass
-    
-    return upload_successful
 
 async def fetch_and_load_trackers():
     print("Fetching latest tracker lists...")
