@@ -2,6 +2,9 @@
 
 A high-performance, resilient Telegram bot to "Teleport" files from the BitTorrent network directly to your Telegram channel.
 
+![](https://files.catbox.moe/zwbfi0.png)
+![](https://files.catbox.moe/3igofx.png)
+
 ## Core Features
 
 *   **High-Performance Architecture:** Built with a multi-worker, asynchronous design, Torregram can handle multiple downloads, uploads, and media processing tasks simultaneously without freezing.
