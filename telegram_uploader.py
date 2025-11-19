@@ -26,7 +26,7 @@ from state import AppState
 INDEX_FILE = "channel_index.json"
 MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024 # 2000 MB safe limit
 
-# ... (All functions from the top down to split_large_file are unchanged) ...
+# ... (All functions from the top down to prepare_file_for_upload are unchanged) ...
 def load_index_from_disk(app_state: AppState):
     print("Loading channel file index from disk...")
     try:
@@ -400,34 +400,59 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         print(f"Telethon: Error uploading {file_path}: {e}")
         return False
 
-async def split_large_file(file_path: str) -> list[str]:
+# --- NEW: Native Python Splitter with Progress ---
+async def split_large_file(app, app_state, info_hash_str, file_path: str) -> list[str]:
     print(f"Splitting large file: {os.path.basename(file_path)}")
+    
     split_dir = os.path.join("downloads", ".transcode_temp", f"split_{uuid.uuid4()}")
     os.makedirs(split_dir, exist_ok=True)
     
     base_name = os.path.basename(file_path)
-    output_prefix = os.path.join(split_dir, f"{base_name}.part")
-    
-    command = ['split', '-b', '2000M', '-d', file_path, output_prefix]
+    parts = []
     
     try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await process.communicate()
+        file_size = os.path.getsize(file_path)
+        chunk_size = 10 * 1024 * 1024 # 10MB buffer
+        part_num = 1
+        bytes_read_total = 0
+        last_update_time = 0
+
+        with open(file_path, 'rb') as infile:
+            while True:
+                part_filename = f"{base_name}.{part_num:03d}"
+                part_path = os.path.join(split_dir, part_filename)
+                current_part_size = 0
+                
+                with open(part_path, 'wb') as outfile:
+                    while current_part_size < MAX_FILE_SIZE_BYTES:
+                        chunk = await asyncio.to_thread(infile.read, chunk_size)
+                        if not chunk:
+                            break
+                        await asyncio.to_thread(outfile.write, chunk)
+                        current_part_size += len(chunk)
+                        bytes_read_total += len(chunk)
+                        
+                        # Update progress
+                        now = time.time()
+                        if now - last_update_time > 5:
+                            last_update_time = now
+                            percent = (bytes_read_total / file_size) * 100
+                            await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting `{base_name}` ({percent:.1f}%)")
+
+                if current_part_size > 0:
+                    parts.append(part_path)
+                    part_num += 1
+                
+                if infile.tell() >= file_size:
+                    break
         
-        if process.returncode == 0:
-            parts = sorted(glob.glob(f"{output_prefix}*"))
-            print(f"Successfully split into {len(parts)} parts.")
-            return parts
-        else:
-            print("Split command failed.")
-            return []
+        print(f"Successfully split into {len(parts)} parts.")
+        return parts
+
     except Exception as e:
         print(f"Error splitting file: {e}")
         return []
+# -------------------------------------------------
 
 async def uploader_worker(app, telethon_client: TelegramClient, app_state: AppState, session):
     while True:
@@ -520,7 +545,6 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
         
         await refresh_status_panel(app.bot, app_state, info_hash_str, f"Preparing `{filename}`...")
         
-        # --- FIX: Process/Compress FIRST, then check size ---
         path_to_upload = await prepare_file_for_upload(app, app_state, info_hash_str, file_path)
         if path_to_upload != file_path:
             prepared_path = path_to_upload
@@ -528,12 +552,12 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
         if not path_to_upload:
             raise Exception("File preparation failed.")
         
-        # Check size of the *processed* file
         final_size = os.path.getsize(path_to_upload)
         
         if final_size > MAX_FILE_SIZE_BYTES:
             await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting large file `{filename}`...")
-            split_parts = await split_large_file(path_to_upload)
+            # --- FIX: Use the new Python splitter ---
+            split_parts = await split_large_file(app, app_state, info_hash_str, path_to_upload)
             
             if not split_parts:
                 await refresh_status_panel(app.bot, app_state, info_hash_str, f"⚠️ Failed to split large file `{filename}`.")
@@ -552,7 +576,6 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
                 telethon_client, app.bot, app_state, 
                 path_to_upload, filename, info_hash_str
             )
-        # ----------------------------------------------------
         
         if not upload_successful:
             await refresh_status_panel(app.bot, app_state, info_hash_str, f"⚠️ Upload failed for `{filename}`.")
