@@ -26,7 +26,7 @@ from state import AppState
 INDEX_FILE = "channel_index.json"
 MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024 # 2000 MB safe limit
 
-# ... (All functions from the top down to upload_with_telethon are unchanged) ...
+# ... (All functions from the top down to split_large_file are unchanged) ...
 def load_index_from_disk(app_state: AppState):
     print("Loading channel file index from disk...")
     try:
@@ -384,20 +384,16 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
             force_document = False
 
         print(f"Telethon: Starting upload for {original_filename} (as_document: {force_document})")
-        
-        # --- FIX: Removed caption argument for clean uploads ---
         await telethon_client.send_file(
             config.TARGET_CHAT_ID, 
             file_path, 
-            # caption=original_filename,  <-- REMOVED
+            caption=original_filename, 
             force_document=force_document, 
             attributes=attributes, 
             workers=config.TELETHON_UPLOAD_WORKERS, 
             part_size_kb=config.TELETHON_PART_SIZE_KB,
             progress_callback=progress_callback
         )
-        # -----------------------------------------------------
-        
         print(f"Telethon: Successfully uploaded {original_filename}")
         
         filesize = os.path.getsize(file_path)
@@ -411,7 +407,6 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         print(f"Telethon: Error uploading {file_path}: {e}")
         return False
 
-# ... (The rest of the file from _split_file_sync down to the end is unchanged) ...
 def _split_file_sync(file_path, split_dir, chunk_size, max_size, progress_callback):
     try:
         base_name = os.path.basename(file_path)
@@ -484,7 +479,8 @@ async def split_large_file(app, app_state, info_hash_str, file_path: str) -> lis
         
     return parts
 
-async def flush_upload_buffer(app, telethon_client, app_state, info_hash_str):
+# --- FIX: Pass the session object to flush_upload_buffer ---
+async def flush_upload_buffer(app, telethon_client, app_state, info_hash_str, session):
     if info_hash_str not in app_state.torrent_locks: return
     lock = app_state.torrent_locks[info_hash_str]
 
@@ -525,7 +521,7 @@ async def flush_upload_buffer(app, telethon_client, app_state, info_hash_str):
             
             handle = torrent_data["handle"]
             if handle.is_valid():
-                session = torrent_data["handle"].session()
+                # --- FIX: Use the passed session object ---
                 session.remove_torrent(handle, session.delete_files)
             
             jobs = app.job_queue.get_jobs_by_name(f"job_{info_hash_str}")
@@ -589,7 +585,8 @@ async def uploader_worker(app, telethon_client: TelegramClient, app_state: AppSt
                 if torrent_data:
                     torrent_data["ready_buffer"][file_index] = prepared_files
             
-            await flush_upload_buffer(app, telethon_client, app_state, info_hash_str)
+            # --- FIX: Pass the session object ---
+            await flush_upload_buffer(app, telethon_client, app_state, info_hash_str, session)
 
         except Exception as e:
             print(f"Error in uploader_worker for {item.get('path', 'N/A')}: {e}")
