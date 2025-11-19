@@ -13,6 +13,7 @@ import uuid
 import libtorrent as lt
 import math
 import re
+import glob
 
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
@@ -23,8 +24,75 @@ import config
 from state import AppState
 
 INDEX_FILE = "channel_index.json"
+MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024 # 2000 MB safe limit
 
-# --- FIX: Renamed the function to match what other files are importing ---
+# ... (All functions from the top down to split_large_file are unchanged) ...
+def load_index_from_disk(app_state: AppState):
+    print("Loading channel file index from disk...")
+    try:
+        if os.path.exists(INDEX_FILE):
+            with open(INDEX_FILE, 'r') as f:
+                data = json.load(f)
+                app_state.channel_file_index = {tuple(item) for item in data}
+                print(f"Loaded {len(app_state.channel_file_index)} file fingerprints from {INDEX_FILE}.")
+        else:
+            print("Index file not found. A new one will be created.")
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error loading index file: {e}. Starting with an empty index.")
+        app_state.channel_file_index = set()
+
+async def save_fingerprint_to_disk(filename: str, filesize: int):
+    try:
+        data = []
+        if os.path.exists(INDEX_FILE) and os.path.getsize(INDEX_FILE) > 0:
+            with open(INDEX_FILE, 'r') as f:
+                data = json.load(f)
+        
+        data.append([filename, filesize])
+        
+        with open(INDEX_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"CRITICAL: Could not save new fingerprint to index file: {e}")
+
+STATE_MAP = {
+    lt.torrent_status.states.queued_for_checking: "Queued",
+    lt.torrent_status.states.checking_files: "Checking",
+    lt.torrent_status.states.downloading_metadata: "Fetching Metadata",
+    lt.torrent_status.states.downloading: "Downloading",
+    lt.torrent_status.states.finished: "Finished",
+    lt.torrent_status.states.seeding: "Seeding",
+    lt.torrent_status.states.allocating: "Allocating",
+    lt.torrent_status.states.checking_resume_data: "Resuming",
+}
+
+def format_bytes(size_bytes):
+    if size_bytes == 0:
+        return "0 B"
+    size_name = ("B", "KB", "MB", "GB", "TB")
+    i = int(math.floor(math.log(size_bytes, 1024)))
+    p = math.pow(1024, i)
+    s = round(size_bytes / p, 2)
+    return f"{s} {size_name[i]}"
+
+def format_time(seconds):
+    if seconds is None or seconds == float('inf') or seconds < 0:
+        return "∞"
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    parts = []
+    if d > 0: parts.append(f"{int(d)}d")
+    if h > 0: parts.append(f"{int(h)}h")
+    if m > 0: parts.append(f"{int(m)}m")
+    if s > 0 or not parts: parts.append(f"{int(s)}s")
+    return " ".join(parts)
+
+def create_progress_bar(progress, length=10):
+    filled_length = int(length * progress)
+    bar = '█' * filled_length + '░' * (length - filled_length)
+    return f"[{bar}]"
+
 async def refresh_status_panel(bot: Bot, app_state: AppState, info_hash_str: str, current_task: str, is_final: bool = False):
     torrent_data = app_state.active_torrents.get(info_hash_str)
     if not torrent_data or not torrent_data.get('user_chat_id') or not torrent_data.get('status_message_id'):
@@ -93,71 +161,6 @@ async def refresh_status_panel(bot: Bot, app_state: AppState, info_hash_str: str
         if "Message is not modified" not in str(e):
             print(f"Error updating status panel (ignoring): {e}")
 
-# ... (The rest of the file is unchanged, but I'll include it for completeness) ...
-STATE_MAP = {
-    lt.torrent_status.states.queued_for_checking: "Queued",
-    lt.torrent_status.states.checking_files: "Checking",
-    lt.torrent_status.states.downloading_metadata: "Fetching Metadata",
-    lt.torrent_status.states.downloading: "Downloading",
-    lt.torrent_status.states.finished: "Finished",
-    lt.torrent_status.states.seeding: "Seeding",
-    lt.torrent_status.states.allocating: "Allocating",
-    lt.torrent_status.states.checking_resume_data: "Resuming",
-}
-
-def format_bytes(size_bytes):
-    if size_bytes <= 0: return "0 B"
-    size_name = ("B", "KB", "MB", "GB", "TB")
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_name[i]}"
-
-def format_time(seconds):
-    if seconds is None or seconds == float('inf') or seconds < 0: return "∞"
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    d, h = divmod(h, 24)
-    parts = []
-    if d > 0: parts.append(f"{int(d)}d")
-    if h > 0: parts.append(f"{int(h)}h")
-    if m > 0: parts.append(f"{int(m)}m")
-    if s > 0 or not parts: parts.append(f"{int(s)}s")
-    return " ".join(parts)
-
-def create_progress_bar(progress, length=10):
-    filled_length = int(length * progress)
-    bar = '█' * filled_length + '░' * (length - filled_length)
-    return f"[{bar}]"
-
-def load_index_from_disk(app_state: AppState):
-    print("Loading channel file index from disk...")
-    try:
-        if os.path.exists(INDEX_FILE):
-            with open(INDEX_FILE, 'r') as f:
-                data = json.load(f)
-                app_state.channel_file_index = {tuple(item) for item in data}
-                print(f"Loaded {len(app_state.channel_file_index)} file fingerprints from {INDEX_FILE}.")
-        else:
-            print("Index file not found. A new one will be created.")
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"Error loading index file: {e}. Starting with an empty index.")
-        app_state.channel_file_index = set()
-
-async def save_fingerprint_to_disk(filename: str, filesize: int):
-    try:
-        data = []
-        if os.path.exists(INDEX_FILE) and os.path.getsize(INDEX_FILE) > 0:
-            with open(INDEX_FILE, 'r') as f:
-                data = json.load(f)
-        
-        data.append([filename, filesize])
-        
-        with open(INDEX_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
-    except (IOError, json.JSONDecodeError) as e:
-        print(f"CRITICAL: Could not save new fingerprint to index file: {e}")
-
 def _extract_sync(archive_path, extract_dir):
     try:
         if archive_path.lower().endswith('.zip'):
@@ -219,7 +222,6 @@ async def get_media_metadata(file_path: str) -> dict | None:
         stdout, stderr = await process.communicate()
 
         if process.returncode != 0:
-            print(f"ffprobe failed for {os.path.basename(file_path)}: {stderr.decode().strip()}")
             return None
 
         data = json.loads(stdout.decode())
@@ -398,6 +400,35 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         print(f"Telethon: Error uploading {file_path}: {e}")
         return False
 
+async def split_large_file(file_path: str) -> list[str]:
+    print(f"Splitting large file: {os.path.basename(file_path)}")
+    split_dir = os.path.join("downloads", ".transcode_temp", f"split_{uuid.uuid4()}")
+    os.makedirs(split_dir, exist_ok=True)
+    
+    base_name = os.path.basename(file_path)
+    output_prefix = os.path.join(split_dir, f"{base_name}.part")
+    
+    command = ['split', '-b', '2000M', '-d', file_path, output_prefix]
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await process.communicate()
+        
+        if process.returncode == 0:
+            parts = sorted(glob.glob(f"{output_prefix}*"))
+            print(f"Successfully split into {len(parts)} parts.")
+            return parts
+        else:
+            print("Split command failed.")
+            return []
+    except Exception as e:
+        print(f"Error splitting file: {e}")
+        return []
+
 async def uploader_worker(app, telethon_client: TelegramClient, app_state: AppState, session):
     while True:
         item = await app_state.upload_queue.get()
@@ -467,6 +498,8 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
     
     prepared_path = None
     upload_successful = False
+    split_parts = []
+
     try:
         filename = os.path.basename(file_path)
         
@@ -487,17 +520,39 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
         
         await refresh_status_panel(app.bot, app_state, info_hash_str, f"Preparing `{filename}`...")
         
+        # --- FIX: Process/Compress FIRST, then check size ---
         path_to_upload = await prepare_file_for_upload(app, app_state, info_hash_str, file_path)
         if path_to_upload != file_path:
             prepared_path = path_to_upload
 
         if not path_to_upload:
             raise Exception("File preparation failed.")
-
-        upload_successful = await upload_with_telethon(
-            telethon_client, app.bot, app_state, 
-            path_to_upload, filename, info_hash_str
-        )
+        
+        # Check size of the *processed* file
+        final_size = os.path.getsize(path_to_upload)
+        
+        if final_size > MAX_FILE_SIZE_BYTES:
+            await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting large file `{filename}`...")
+            split_parts = await split_large_file(path_to_upload)
+            
+            if not split_parts:
+                await refresh_status_panel(app.bot, app_state, info_hash_str, f"⚠️ Failed to split large file `{filename}`.")
+                return False
+            
+            all_parts_uploaded = True
+            for i, part_path in enumerate(split_parts):
+                part_name = os.path.basename(part_path)
+                await refresh_status_panel(app.bot, app_state, info_hash_str, f"Uploading part {i+1}/{len(split_parts)}: `{part_name}`")
+                if not await upload_with_telethon(telethon_client, app.bot, app_state, part_path, part_name, info_hash_str):
+                    all_parts_uploaded = False
+                    break
+            upload_successful = all_parts_uploaded
+        else:
+            upload_successful = await upload_with_telethon(
+                telethon_client, app.bot, app_state, 
+                path_to_upload, filename, info_hash_str
+            )
+        # ----------------------------------------------------
         
         if not upload_successful:
             await refresh_status_panel(app.bot, app_state, info_hash_str, f"⚠️ Upload failed for `{filename}`.")
@@ -511,6 +566,14 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
                 os.rmdir(os.path.dirname(file_path))
             except OSError:
                 pass
+        for part in split_parts:
+            if os.path.exists(part):
+                os.remove(part)
+        if split_parts:
+             try:
+                 os.rmdir(os.path.dirname(split_parts[0]))
+             except OSError:
+                 pass
     
     return upload_successful
 
