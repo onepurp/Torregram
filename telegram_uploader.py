@@ -26,7 +26,7 @@ from state import AppState
 INDEX_FILE = "channel_index.json"
 MAX_FILE_SIZE_BYTES = 2000 * 1024 * 1024 # 2000 MB safe limit
 
-# ... (All functions from the top down to prepare_file_for_upload are unchanged) ...
+# ... (All functions from the top down to upload_with_telethon are unchanged) ...
 def load_index_from_disk(app_state: AppState):
     print("Loading channel file index from disk...")
     try:
@@ -382,11 +382,22 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
             force_document = False
 
         print(f"Telethon: Starting upload for {original_filename} (as_document: {force_document})")
+        
+        # --- FIX: Optimized Upload Settings ---
+        # Use a larger part size (512KB is default, 2048KB is better for speed)
+        # Use more parallel workers (default is 1, we use 4)
         await telethon_client.send_file(
-            config.TARGET_CHAT_ID, file_path, caption=original_filename, 
-            force_document=force_document, attributes=attributes, 
-            workers=config.UPLOAD_WORKERS, progress_callback=progress_callback
+            config.TARGET_CHAT_ID, 
+            file_path, 
+            caption=original_filename, 
+            force_document=force_document, 
+            attributes=attributes, 
+            part_size_kb=2048, # Larger chunks
+            workers=4,         # Parallel uploads
+            progress_callback=progress_callback
         )
+        # --------------------------------------
+        
         print(f"Telethon: Successfully uploaded {original_filename}")
         
         filesize = os.path.getsize(file_path)
@@ -400,21 +411,14 @@ async def upload_with_telethon(telethon_client: TelegramClient, bot: Bot, app_st
         print(f"Telethon: Error uploading {file_path}: {e}")
         return False
 
-# --- NEW: Native Python Splitter with Progress ---
-async def split_large_file(app, app_state, info_hash_str, file_path: str) -> list[str]:
-    print(f"Splitting large file: {os.path.basename(file_path)}")
-    
-    split_dir = os.path.join("downloads", ".transcode_temp", f"split_{uuid.uuid4()}")
-    os.makedirs(split_dir, exist_ok=True)
-    
-    base_name = os.path.basename(file_path)
-    parts = []
-    
+# ... (The rest of the file from _split_file_sync down to the end is unchanged) ...
+def _split_file_sync(file_path, split_dir, chunk_size, max_size, progress_callback):
     try:
+        base_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
-        chunk_size = 10 * 1024 * 1024 # 10MB buffer
         part_num = 1
         bytes_read_total = 0
+        parts = []
         last_update_time = 0
 
         with open(file_path, 'rb') as infile:
@@ -424,20 +428,19 @@ async def split_large_file(app, app_state, info_hash_str, file_path: str) -> lis
                 current_part_size = 0
                 
                 with open(part_path, 'wb') as outfile:
-                    while current_part_size < MAX_FILE_SIZE_BYTES:
-                        chunk = await asyncio.to_thread(infile.read, chunk_size)
+                    while current_part_size < max_size:
+                        chunk = infile.read(chunk_size)
                         if not chunk:
                             break
-                        await asyncio.to_thread(outfile.write, chunk)
+                        outfile.write(chunk)
                         current_part_size += len(chunk)
                         bytes_read_total += len(chunk)
                         
-                        # Update progress
                         now = time.time()
                         if now - last_update_time > 5:
                             last_update_time = now
                             percent = (bytes_read_total / file_size) * 100
-                            await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting `{base_name}` ({percent:.1f}%)")
+                            progress_callback(percent)
 
                 if current_part_size > 0:
                     parts.append(part_path)
@@ -445,14 +448,41 @@ async def split_large_file(app, app_state, info_hash_str, file_path: str) -> lis
                 
                 if infile.tell() >= file_size:
                     break
-        
-        print(f"Successfully split into {len(parts)} parts.")
         return parts
-
     except Exception as e:
-        print(f"Error splitting file: {e}")
+        print(f"Error in sync splitter: {e}")
         return []
-# -------------------------------------------------
+
+async def split_large_file(app, app_state, info_hash_str, file_path: str) -> list[str]:
+    print(f"Splitting large file: {os.path.basename(file_path)}")
+    
+    split_dir = os.path.join("downloads", ".transcode_temp", f"split_{uuid.uuid4()}")
+    os.makedirs(split_dir, exist_ok=True)
+    
+    base_name = os.path.basename(file_path)
+    
+    loop = asyncio.get_running_loop()
+    def progress_callback(percent):
+        asyncio.run_coroutine_threadsafe(
+            refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting `{base_name}` ({percent:.1f}%)"),
+            loop
+        )
+
+    parts = await asyncio.to_thread(
+        _split_file_sync, 
+        file_path, 
+        split_dir, 
+        10 * 1024 * 1024, 
+        MAX_FILE_SIZE_BYTES, 
+        progress_callback
+    )
+    
+    if parts:
+        print(f"Successfully split into {len(parts)} parts.")
+    else:
+        print("Split failed.")
+        
+    return parts
 
 async def uploader_worker(app, telethon_client: TelegramClient, app_state: AppState, session):
     while True:
@@ -556,7 +586,6 @@ async def process_single_file(app, telethon_client, app_state, item) -> bool:
         
         if final_size > MAX_FILE_SIZE_BYTES:
             await refresh_status_panel(app.bot, app_state, info_hash_str, f"Splitting large file `{filename}`...")
-            # --- FIX: Use the new Python splitter ---
             split_parts = await split_large_file(app, app_state, info_hash_str, path_to_upload)
             
             if not split_parts:
